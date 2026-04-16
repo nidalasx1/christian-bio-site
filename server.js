@@ -1,9 +1,13 @@
 const express = require('express');
+const crypto = require('crypto');
 const path = require('path');
 const Database = require('better-sqlite3');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
+
+// Session tokens (in-memory, cleared on restart)
+const sessions = new Map();
 
 // Initialize SQLite database for visitor tracking
 const db = new Database(process.env.DB_PATH || './visitors.db');
@@ -40,7 +44,77 @@ const insertChapterRead = db.prepare(
 );
 
 app.use(express.json());
+app.use(express.urlencoded({ extended: false }));
 app.use(express.static(path.join(__dirname, 'public')));
+
+// Parse session cookie
+function getSession(req) {
+  const cookie = req.headers.cookie || '';
+  const match = cookie.match(/session=([a-f0-9]+)/);
+  return match ? sessions.get(match[1]) : null;
+}
+
+// Admin login page
+app.get('/admin', (req, res) => {
+  if (getSession(req)) return res.redirect('/stats');
+  const error = req.query.error ? '<p class="error">Invalid password. Try again.</p>' : '';
+  res.send(`<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Admin Login</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { font-family: 'DM Sans', system-ui, sans-serif; background: #0a0a0a; color: #e0e0e0; display: flex; align-items: center; justify-content: center; min-height: 100vh; }
+    .login { background: #111; border: 1px solid #222; border-radius: 16px; padding: 2.5rem; width: 100%; max-width: 380px; }
+    .login h1 { font-size: 1.4rem; color: #fff; margin-bottom: 0.5rem; }
+    .login .sub { font-size: 0.85rem; color: #666; margin-bottom: 2rem; }
+    label { display: block; font-size: 0.8rem; color: #888; letter-spacing: 0.1em; text-transform: uppercase; margin-bottom: 0.5rem; }
+    input[type="password"] { width: 100%; padding: 0.75rem 1rem; background: #0a0a0a; border: 1px solid #333; border-radius: 8px; color: #e0e0e0; font-size: 1rem; font-family: inherit; outline: none; transition: border-color 0.2s; }
+    input[type="password"]:focus { border-color: #c9a96e; }
+    button { width: 100%; margin-top: 1.5rem; padding: 0.75rem; background: #c9a96e; color: #0a0a0a; border: none; border-radius: 8px; font-size: 0.95rem; font-weight: 600; font-family: inherit; cursor: pointer; transition: opacity 0.2s; }
+    button:hover { opacity: 0.85; }
+    .error { color: #e74c3c; font-size: 0.85rem; margin-bottom: 1rem; }
+    a { color: #c9a96e; text-decoration: none; display: block; text-align: center; margin-top: 1.5rem; font-size: 0.85rem; }
+  </style>
+  <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;700&display=swap" rel="stylesheet">
+</head>
+<body>
+  <form class="login" method="POST" action="/admin/login">
+    <h1>Analytics</h1>
+    <p class="sub">Enter your admin password to view stats.</p>
+    ${error}
+    <label for="pw">Password</label>
+    <input type="password" id="pw" name="password" autofocus required>
+    <button type="submit">Sign In</button>
+    <a href="/">Back to site</a>
+  </form>
+</body>
+</html>`);
+});
+
+// Handle login
+app.post('/admin/login', (req, res) => {
+  const statsKey = process.env.STATS_KEY;
+  if (!statsKey) return res.status(500).send('STATS_KEY not configured.');
+  const { password } = req.body;
+  if (password !== statsKey) {
+    return res.redirect('/admin?error=1');
+  }
+  const token = crypto.randomBytes(32).toString('hex');
+  sessions.set(token, { created: Date.now() });
+  res.setHeader('Set-Cookie', `session=${token}; Path=/; HttpOnly; SameSite=Strict; Max-Age=86400`);
+  res.redirect('/stats');
+});
+
+// Handle logout
+app.get('/admin/logout', (req, res) => {
+  const cookie = (req.headers.cookie || '').match(/session=([a-f0-9]+)/);
+  if (cookie) sessions.delete(cookie[1]);
+  res.setHeader('Set-Cookie', 'session=; Path=/; HttpOnly; Max-Age=0');
+  res.redirect('/admin');
+});
 
 // Track page visit
 app.post('/api/track', (req, res) => {
@@ -79,18 +153,9 @@ app.post('/api/track-chapter', (req, res) => {
 const esc = s => String(s).replace(/[&<>"']/g, c =>
   ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 
-// Stats dashboard (password-protected via HTTP Basic Auth)
+// Stats dashboard (cookie-session protected)
 app.get('/stats', (req, res) => {
-  const statsKey = process.env.STATS_KEY;
-  if (!statsKey) {
-    return res.status(500).send('STATS_KEY environment variable not set.');
-  }
-  const auth = req.headers.authorization || '';
-  const [scheme, cred] = auth.split(' ');
-  const expected = Buffer.from(`admin:${statsKey}`).toString('base64');
-  if (scheme !== 'Basic' || cred !== expected) {
-    return res.status(401).set('WWW-Authenticate', 'Basic realm="Stats"').send('Unauthorized');
-  }
+  if (!getSession(req)) return res.redirect('/admin');
 
   const totalVisits = db.prepare('SELECT COUNT(*) as count FROM visits').get().count;
   const todayVisits = db.prepare(
@@ -131,11 +196,18 @@ app.get('/stats', (req, res) => {
     td { color: #ccc; }
     .ua { max-width: 300px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     a { color: #c9a96e; }
+    .header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 1.5rem; }
+    .header h1 { margin-bottom: 0; }
+    .logout { font-size: 0.85rem; color: #888; text-decoration: none; padding: 0.4rem 1rem; border: 1px solid #333; border-radius: 6px; transition: all 0.2s; }
+    .logout:hover { color: #fff; border-color: #c9a96e; }
   </style>
   <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;700&display=swap" rel="stylesheet">
 </head>
 <body>
-  <h1>Visitor Stats</h1>
+  <div class="header">
+    <h1>Visitor Stats</h1>
+    <a href="/admin/logout" class="logout">Sign Out</a>
+  </div>
   <div class="grid">
     <div class="card"><div class="num">${totalVisits}</div><div class="label">Total Visits</div></div>
     <div class="card"><div class="num">${todayVisits}</div><div class="label">Today</div></div>
