@@ -75,11 +75,21 @@ app.post('/api/track-chapter', (req, res) => {
   }
 });
 
-// Stats dashboard (password-protected)
+// HTML escape to prevent stored XSS
+const esc = s => String(s).replace(/[&<>"']/g, c =>
+  ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+
+// Stats dashboard (password-protected via HTTP Basic Auth)
 app.get('/stats', (req, res) => {
-  const password = req.query.key;
-  if (password !== (process.env.STATS_KEY || 'nidalas2026')) {
-    return res.status(401).send('Unauthorized. Add ?key=YOUR_STATS_KEY to the URL.');
+  const statsKey = process.env.STATS_KEY;
+  if (!statsKey) {
+    return res.status(500).send('STATS_KEY environment variable not set.');
+  }
+  const auth = req.headers.authorization || '';
+  const [scheme, cred] = auth.split(' ');
+  const expected = Buffer.from(`admin:${statsKey}`).toString('base64');
+  if (scheme !== 'Basic' || cred !== expected) {
+    return res.status(401).set('WWW-Authenticate', 'Basic realm="Stats"').send('Unauthorized');
   }
 
   const totalVisits = db.prepare('SELECT COUNT(*) as count FROM visits').get().count;
@@ -135,7 +145,7 @@ app.get('/stats', (req, res) => {
   <h2>Chapter Engagement</h2>
   <table>
     <tr><th>Chapter</th><th>Total Reads</th><th>Unique Readers</th></tr>
-    ${chapterStats.map(c => `<tr><td>${c.chapter}</td><td>${c.reads}</td><td>${c.unique_readers}</td></tr>`).join('')}
+    ${chapterStats.map(c => `<tr><td>${esc(c.chapter)}</td><td>${c.reads}</td><td>${c.unique_readers}</td></tr>`).join('')}
   </table>
 
   <h2>Daily Visits (Last 30 Days)</h2>
@@ -147,18 +157,18 @@ app.get('/stats', (req, res) => {
   <h2>Top Referrers</h2>
   <table>
     <tr><th>Referrer</th><th>Count</th></tr>
-    ${topReferrers.map(r => `<tr><td>${r.referrer}</td><td>${r.count}</td></tr>`).join('')}
+    ${topReferrers.map(r => `<tr><td>${esc(r.referrer)}</td><td>${r.count}</td></tr>`).join('')}
   </table>
 
   <h2>Recent Visits</h2>
   <table>
     <tr><th>Time</th><th>IP</th><th>Country</th><th>Referrer</th><th>User Agent</th></tr>
     ${recentVisits.map(v => `<tr>
-      <td>${v.timestamp}</td>
-      <td>${v.ip}</td>
-      <td>${v.country || '—'} ${v.city || ''}</td>
-      <td>${v.referrer || '—'}</td>
-      <td class="ua">${v.user_agent}</td>
+      <td>${esc(v.timestamp)}</td>
+      <td>${esc(v.ip)}</td>
+      <td>${esc(v.country || '—')} ${esc(v.city || '')}</td>
+      <td>${esc(v.referrer || '—')}</td>
+      <td class="ua">${esc(v.user_agent)}</td>
     </tr>`).join('')}
   </table>
 </body>

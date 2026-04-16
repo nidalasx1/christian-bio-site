@@ -1,0 +1,8 @@
+node_modules/
+visitors.db
+visitors.db-shm
+visitors.db-wal
+.git
+.gitignore
+.env
+.gstack/
